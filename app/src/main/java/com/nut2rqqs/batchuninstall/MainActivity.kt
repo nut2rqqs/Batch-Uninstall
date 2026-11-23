@@ -62,7 +62,7 @@ class MainActivity : Activity() {
 
         searchInput = EditText(this).apply {
             hint = "ค้นหาชื่อแอปหรือ package"
-            singleLine = true
+            setSingleLine(true)
         }
         root.addView(searchInput)
 
