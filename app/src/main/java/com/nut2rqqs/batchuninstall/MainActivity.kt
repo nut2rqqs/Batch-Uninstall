@@ -67,7 +67,7 @@ class MainActivity : Activity() {
         root.addView(searchInput)
 
         includeSystemCheck = CheckBox(this).apply {
-            text = "รวมแอประบบ"
+            text = "รวมแอประบบ (ดูรายการได้ แต่โหมด Root จะไม่ถอน)"
             setOnCheckedChangeListener { _, _ -> renderApps() }
         }
         root.addView(includeSystemCheck)
@@ -89,16 +89,28 @@ class MainActivity : Activity() {
         }, weightedParams())
         root.addView(actions)
 
-        val uninstallButton = actionButton("ถอนการติดตั้งแอปที่เลือก") {
+        val uninstallButton = actionButton("ถอนผ่าน Android (ยืนยันทีละแอป)") {
             beginBatchUninstall()
         }.apply {
-            textSize = 16f
+            textSize = 15f
             isAllCaps = false
         }
-        root.addView(uninstallButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(8); bottomMargin = dp(8) })
+        root.addView(uninstallButton, fullWidthParams())
+
+        val rootUninstallButton = actionButton("ถอนแอปที่เลือกด้วย Root / KernelSU") {
+            beginRootBatchUninstall()
+        }.apply {
+            textSize = 15f
+            isAllCaps = false
+        }
+        root.addView(rootUninstallButton, fullWidthParams())
+
+        val note = TextView(this).apply {
+            text = "โหมด Root ใช้คำสั่ง pm uninstall --user 0 จึงถอนแอปสำหรับผู้ใช้ปัจจุบัน ไม่ลบไฟล์ APK จากพาร์ทิชันระบบ และข้ามแอประบบเพื่อความปลอดภัย"
+            textSize = 12f
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        root.addView(note)
 
         val scrollView = ScrollView(this)
         appList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -192,6 +204,10 @@ class MainActivity : Activity() {
                 textSize = 12f
             })
             row.addView(TextView(this).apply {
+                text = if (app.isSystem) "ประเภท: แอประบบ" else "ประเภท: แอปผู้ใช้"
+                textSize = 12f
+            })
+            row.addView(TextView(this).apply {
                 text = if (app.hasLaunchActivity) "สถานะ: พบหน้าสำหรับเปิดแอป" else "สถานะ: ไม่พบหน้าสำหรับเปิดแอป"
                 textSize = 12f
             })
@@ -219,6 +235,56 @@ class MainActivity : Activity() {
             Toast.LENGTH_LONG
         ).show()
         launchNextUninstall()
+    }
+
+    private fun beginRootBatchUninstall() {
+        if (selectedPackages.isEmpty()) {
+            Toast.makeText(this, "กรุณาเลือกแอปก่อน", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val selected = selectedPackages.toList()
+        val userApps = selected.filter { pkg -> apps.any { it.packageName == pkg && !it.isSystem } }
+        val skippedSystemCount = selected.size - userApps.size
+        if (userApps.isEmpty()) {
+            Toast.makeText(this, "ไม่มีแอปผู้ใช้ที่เลือกไว้ (โหมด Root ข้ามแอประบบ)", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        selectedPackages.clear()
+        summary.text = "กำลังตรวจสอบ Root / KernelSU..."
+        Toast.makeText(
+            this,
+            "จะถอนแอปผู้ใช้ ${userApps.size} รายการ และข้ามแอประบบ ${skippedSystemCount} รายการ",
+            Toast.LENGTH_LONG
+        ).show()
+
+        Thread {
+            val rootCheck = RootUninstaller.hasRootAccess()
+            if (!rootCheck.success) {
+                runOnUiThread {
+                    summary.text = "ไม่พบสิทธิ์ Root หรือไม่ได้อนุญาตสิทธิ์ su"
+                    Toast.makeText(this, "Root ไม่พร้อม: ${rootCheck.output}", Toast.LENGTH_LONG).show()
+                    renderApps()
+                }
+                return@Thread
+            }
+
+            var successCount = 0
+            val failures = mutableListOf<String>()
+            userApps.forEach { packageName ->
+                val result = RootUninstaller.uninstallForUser(packageName)
+                if (result.success) successCount++ else failures.add("$packageName: ${result.output}")
+            }
+
+            runOnUiThread {
+                scanApps()
+                val report = "Root ถอนสำเร็จ $successCount/${userApps.size} รายการ" +
+                    if (failures.isEmpty()) "" else "\nไม่สำเร็จ:\n" + failures.take(8).joinToString("\n")
+                summary.text = report
+                Toast.makeText(this, report, Toast.LENGTH_LONG).show()
+            }
+        }.start()
     }
 
     private fun launchNextUninstall() {
@@ -257,6 +323,11 @@ class MainActivity : Activity() {
             isAllCaps = false
             setOnClickListener { onClick() }
         }
+
+    private fun fullWidthParams() = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+    ).apply { topMargin = dp(4); bottomMargin = dp(4) }
 
     private fun weightedParams() = LinearLayout.LayoutParams(
         0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
