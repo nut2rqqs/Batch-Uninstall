@@ -34,6 +34,7 @@ private data class InstalledApp(
     val isSystem: Boolean,
     val hasLaunchActivity: Boolean,
     val firstInstallTime: Long,
+    val lastUpdateTime: Long,
     val apkBytes: Long,
     var cacheBytes: Long? = null
 )
@@ -83,8 +84,11 @@ class MainActivity : Activity() {
 
         sortSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf(
-                "เรียง: ชื่อ A–Z", "ขนาดไฟล์: ใหญ่ → เล็ก", "ขนาดแคช: มาก → น้อย",
-                "วันที่ติดตั้ง: ใหม่ → เก่า", "วันที่ติดตั้ง: เก่า → ใหม่"
+                "ชื่อ: A–Z",
+                "ขนาดไฟล์: ใหญ่ → เล็ก", "ขนาดไฟล์: เล็ก → ใหญ่",
+                "ขนาดแคช: มาก → น้อย", "ขนาดแคช: น้อย → มาก",
+                "วันที่ติดตั้ง: ใหม่ → เก่า", "วันที่ติดตั้ง: เก่า → ใหม่",
+                "วันที่อัปเดต: ใหม่ → เก่า", "วันที่อัปเดต: เก่า → ใหม่"
             ))
             onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -192,7 +196,7 @@ class MainActivity : Activity() {
                 base + splits
             } catch (_: Exception) { 0L }
             apps.add(InstalledApp(label, packageName, isSystem, launchIntent != null,
-                packageInfo?.firstInstallTime ?: 0L, apkBytes))
+                packageInfo?.firstInstallTime ?: 0L, packageInfo?.lastUpdateTime ?: 0L, apkBytes))
         }
 
         val snapshot = apps.toList()
@@ -220,9 +224,13 @@ class MainActivity : Activity() {
 
         val visible = apps.filter(::visibleByFilter).sortedWith(when (sortMode) {
             1 -> compareByDescending<InstalledApp> { it.apkBytes }.thenBy { it.label.lowercase(Locale.getDefault()) }
-            2 -> compareByDescending<InstalledApp> { it.cacheBytes ?: -1L }.thenBy { it.label.lowercase(Locale.getDefault()) }
-            3 -> compareByDescending<InstalledApp> { it.firstInstallTime }
-            4 -> compareBy<InstalledApp> { it.firstInstallTime }
+            2 -> compareBy<InstalledApp> { it.apkBytes }.thenBy { it.label.lowercase(Locale.getDefault()) }
+            3 -> compareByDescending<InstalledApp> { it.cacheBytes ?: -1L }.thenBy { it.label.lowercase(Locale.getDefault()) }
+            4 -> compareBy<InstalledApp> { it.cacheBytes ?: Long.MAX_VALUE }.thenBy { it.label.lowercase(Locale.getDefault()) }
+            5 -> compareByDescending<InstalledApp> { it.firstInstallTime }
+            6 -> compareBy<InstalledApp> { it.firstInstallTime }
+            7 -> compareByDescending<InstalledApp> { it.lastUpdateTime }
+            8 -> compareBy<InstalledApp> { it.lastUpdateTime }
             else -> compareBy<InstalledApp> { it.label.lowercase(Locale.getDefault()) }.thenBy { it.packageName }
         })
         val launchableCount = visible.count { it.hasLaunchActivity }
@@ -270,6 +278,10 @@ class MainActivity : Activity() {
             })
             row.addView(TextView(this).apply {
                 text = "วันที่ติดตั้ง: ${if (app.firstInstallTime > 0) DateFormat.getDateTimeInstance().format(Date(app.firstInstallTime)) else "ไม่ทราบ"}"
+                textSize = 12f
+            })
+            row.addView(TextView(this).apply {
+                text = "วันที่อัปเดต: ${if (app.lastUpdateTime > 0) DateFormat.getDateTimeInstance().format(Date(app.lastUpdateTime)) else "ไม่ทราบ"}"
                 textSize = 12f
             })
             row.addView(TextView(this).apply {
