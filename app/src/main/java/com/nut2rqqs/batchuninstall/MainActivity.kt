@@ -1,6 +1,13 @@
 package com.nut2rqqs.batchuninstall
 
 import android.app.Activity
+import android.app.AppOpsManager
+import android.app.usage.StorageStatsManager
+import android.os.Process
+import android.provider.Settings
+import android.os.storage.StorageManager
+import android.widget.Spinner
+import android.widget.ArrayAdapter
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -18,12 +25,17 @@ import android.widget.TextView
 import android.widget.Toast
 import java.util.ArrayDeque
 import java.util.Locale
+import java.text.DateFormat
+import java.util.Date
 
 private data class InstalledApp(
     val label: String,
     val packageName: String,
     val isSystem: Boolean,
-    val hasLaunchActivity: Boolean
+    val hasLaunchActivity: Boolean,
+    val firstInstallTime: Long,
+    val apkBytes: Long,
+    var cacheBytes: Long? = null
 )
 
 class MainActivity : Activity() {
@@ -32,6 +44,9 @@ class MainActivity : Activity() {
     private lateinit var searchInput: EditText
     private lateinit var includeSystemCheck: CheckBox
     private lateinit var appList: LinearLayout
+    private lateinit var sortSpinner: Spinner
+    private var sortMode = 0
+    private var hasUsageAccess = false
 
     private val apps = mutableListOf<InstalledApp>()
     private val selectedPackages = linkedSetOf<String>()
@@ -65,6 +80,25 @@ class MainActivity : Activity() {
             setSingleLine(true)
         }
         root.addView(searchInput)
+
+        sortSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf(
+                "เรียง: ชื่อ A–Z", "ขนาดไฟล์: ใหญ่ → เล็ก", "ขนาดแคช: มาก → น้อย",
+                "วันที่ติดตั้ง: ใหม่ → เก่า", "วันที่ติดตั้ง: เก่า → ใหม่"
+            ))
+            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    sortMode = position
+                    renderApps()
+                }
+            }
+        }
+        root.addView(sortSpinner, fullWidthParams())
+        root.addView(actionButton("ตั้งค่าสิทธิ์เพื่ออ่านขนาดแคช") {
+            try { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+            catch (_: Exception) { Toast.makeText(this, "เปิดหน้าสิทธิ์ไม่ได้", Toast.LENGTH_SHORT).show() }
+        }, fullWidthParams())
 
         includeSystemCheck = CheckBox(this).apply {
             text = "รวมแอประบบ (ดูรายการได้ แต่โหมด Root จะไม่ถอน)"
@@ -151,11 +185,24 @@ class MainActivity : Activity() {
                 null
             }
 
-            apps.add(InstalledApp(label, packageName, isSystem, launchIntent != null))
+            val packageInfo = try { pm.getPackageInfo(packageName, 0) } catch (_: Exception) { null }
+            val apkBytes = try {
+                val base = java.io.File(info.sourceDir).length()
+                val splits = info.splitSourceDirs?.sumOf { java.io.File(it).length() } ?: 0L
+                base + splits
+            } catch (_: Exception) { 0L }
+            apps.add(InstalledApp(label, packageName, isSystem, launchIntent != null,
+                packageInfo?.firstInstallTime ?: 0L, apkBytes))
         }
 
-        apps.sortWith(compareBy<InstalledApp> { it.label.lowercase(Locale.getDefault()) }
-            .thenBy { it.packageName })
+        val snapshot = apps.toList()
+        Thread {
+            val cacheMap = loadCacheSizes(snapshot)
+            runOnUiThread {
+                apps.forEach { it.cacheBytes = cacheMap[it.packageName] }
+                renderApps()
+            }
+        }.start()
         renderApps()
     }
 
@@ -171,7 +218,13 @@ class MainActivity : Activity() {
         if (!::appList.isInitialized) return
         appList.removeAllViews()
 
-        val visible = apps.filter(::visibleByFilter)
+        val visible = apps.filter(::visibleByFilter).sortedWith(when (sortMode) {
+            1 -> compareByDescending<InstalledApp> { it.apkBytes }.thenBy { it.label.lowercase(Locale.getDefault()) }
+            2 -> compareByDescending<InstalledApp> { it.cacheBytes ?: -1L }.thenBy { it.label.lowercase(Locale.getDefault()) }
+            3 -> compareByDescending<InstalledApp> { it.firstInstallTime }
+            4 -> compareBy<InstalledApp> { it.firstInstallTime }
+            else -> compareBy<InstalledApp> { it.label.lowercase(Locale.getDefault()) }.thenBy { it.packageName }
+        })
         val launchableCount = visible.count { it.hasLaunchActivity }
         summary.text = "พบ ${apps.size} แอป • แสดง ${visible.size} • เปิดได้ ${launchableCount} • เลือก ${selectedPackages.size}"
 
@@ -208,6 +261,18 @@ class MainActivity : Activity() {
                 textSize = 12f
             })
             row.addView(TextView(this).apply {
+                text = "ขนาดไฟล์ APK: ${formatBytes(app.apkBytes)}"
+                textSize = 12f
+            })
+            row.addView(TextView(this).apply {
+                text = "ขนาดแคช: ${app.cacheBytes?.let { formatBytes(it) } ?: if (hasUsageAccess) "อ่านไม่ได้" else "ต้องอนุญาต Usage access"}"
+                textSize = 12f
+            })
+            row.addView(TextView(this).apply {
+                text = "วันที่ติดตั้ง: ${if (app.firstInstallTime > 0) DateFormat.getDateTimeInstance().format(Date(app.firstInstallTime)) else "ไม่ทราบ"}"
+                textSize = 12f
+            })
+            row.addView(TextView(this).apply {
                 text = if (app.hasLaunchActivity) "สถานะ: พบหน้าสำหรับเปิดแอป" else "สถานะ: ไม่พบหน้าสำหรับเปิดแอป"
                 textSize = 12f
             })
@@ -217,6 +282,47 @@ class MainActivity : Activity() {
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
             ))
+        }
+    }
+
+
+    private fun loadCacheSizes(targetApps: List<InstalledApp>): Map<String, Long> {
+        val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
+        hasUsageAccess = try {
+            appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+        } catch (_: Exception) { false }
+        if (!hasUsageAccess) return emptyMap()
+        val storageStats = getSystemService(STORAGE_STATS_SERVICE) as StorageStatsManager
+        val result = mutableMapOf<String, Long>()
+        targetApps.forEach { app ->
+            try {
+                result[app.packageName] = storageStats.queryStatsForPackage(
+                    StorageManager.UUID_DEFAULT, app.packageName, Process.myUserHandle()
+                ).cacheBytes
+            } catch (_: Exception) { }
+        }
+        return result
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 1024) return "$bytes B"
+        val units = arrayOf("KB", "MB", "GB", "TB")
+        var value = bytes.toDouble()
+        var unit = -1
+        do { value /= 1024.0; unit++ } while (value >= 1024 && unit < units.lastIndex)
+        return String.format(Locale.getDefault(), "%.1f %s", value, units[unit])
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::appList.isInitialized && apps.isNotEmpty()) {
+            Thread {
+                val cacheMap = loadCacheSizes(apps.toList())
+                runOnUiThread {
+                    apps.forEach { it.cacheBytes = cacheMap[it.packageName] }
+                    renderApps()
+                }
+            }.start()
         }
     }
 
