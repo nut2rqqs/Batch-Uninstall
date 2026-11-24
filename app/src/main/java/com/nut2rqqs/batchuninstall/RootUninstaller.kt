@@ -9,7 +9,9 @@ object RootUninstaller {
     data class Result(val success: Boolean, val output: String)
 
     fun hasRootAccess(): Result {
-        return runSuCommand("id")
+        val result = runSuCommand("id")
+        val isUidZero = Regex("(^|\\s)uid=0([(:\\s]|$)").containsMatchIn(result.output)
+        return Result(result.success && isUidZero, result.output.ifBlank { "No su output" })
     }
 
     fun uninstallForUser(packageName: String): Result {
@@ -30,8 +32,10 @@ object RootUninstaller {
             if (finished != 0) {
                 Result(false, output.ifBlank { "su exited with code $finished" })
             } else {
-                val success = command == "id" || output.lineSequence().any {
-                    it.trim().equals("Success", ignoreCase = true)
+                val success = if (command == "id") {
+                    Regex("(^|\\s)uid=0([(:\\s]|$)").containsMatchIn(output)
+                } else {
+                    output.lineSequence().any { it.trim().equals("Success", ignoreCase = true) }
                 }
                 Result(success, output.ifBlank { "No command output" })
             }
