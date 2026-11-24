@@ -15,8 +15,6 @@ import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -56,7 +54,6 @@ class MainActivity : Activity() {
     private var scanGeneration = 0
     private var displayedApps: List<InstalledApp> = emptyList()
     private var renderedCount = 0
-    private val mainHandler = Handler(Looper.getMainLooper())
     private val renderBatchSize = 30
 
     private val apps = mutableListOf<InstalledApp>()
@@ -166,9 +163,10 @@ class MainActivity : Activity() {
         appScrollView = ScrollView(this)
         appList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         appScrollView.addView(appList)
-        appScrollView.setOnScrollChangeListener { view: ScrollView, _, scrollY, _, _ ->
-            val child = view.getChildAt(0) ?: return@setOnScrollChangeListener
-            if (scrollY + view.height >= child.height - dp(180)) appendNextBatch()
+        appScrollView.setOnScrollChangeListener { view, _, scrollY, _, _ ->
+            val scrollView = view as ScrollView
+            val child = scrollView.getChildAt(0) ?: return@setOnScrollChangeListener
+            if (scrollY + scrollView.height >= child.height - dp(180)) appendNextBatch()
         }
         root.addView(appScrollView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
