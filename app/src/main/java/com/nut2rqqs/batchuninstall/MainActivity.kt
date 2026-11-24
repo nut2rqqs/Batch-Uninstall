@@ -1,6 +1,7 @@
 package com.nut2rqqs.batchuninstall
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.AppOpsManager
 import android.app.usage.StorageStatsManager
 import android.os.Process
@@ -371,13 +372,23 @@ class MainActivity : Activity() {
             return
         }
 
+        AlertDialog.Builder(this)
+            .setTitle("ยืนยันการถอนแอปด้วย Root")
+            .setMessage(
+                "คุณกำลังจะถอนแอปผู้ใช้ ${userApps.size} รายการ" +
+                    (if (skippedSystemCount > 0) "\nจะข้ามแอประบบ ${skippedSystemCount} รายการ" else "") +
+                    "\n\nการถอนนี้มีผลกับผู้ใช้ Android ปัจจุบัน และไม่สามารถยกเลิกอัตโนมัติได้"
+            )
+            .setNegativeButton("ยกเลิก", null)
+            .setPositiveButton("ยืนยันถอน") { _, _ ->
+                executeRootBatchUninstall(userApps)
+            }
+            .show()
+    }
+
+    private fun executeRootBatchUninstall(userApps: List<String>) {
         selectedPackages.clear()
         summary.text = "กำลังตรวจสอบ Root / KernelSU..."
-        Toast.makeText(
-            this,
-            "จะถอนแอปผู้ใช้ ${userApps.size} รายการ และข้ามแอประบบ ${skippedSystemCount} รายการ",
-            Toast.LENGTH_LONG
-        ).show()
 
         Thread {
             val rootCheck = RootUninstaller.hasRootAccess()
