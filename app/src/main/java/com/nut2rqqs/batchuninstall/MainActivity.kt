@@ -54,6 +54,7 @@ class MainActivity : Activity() {
     private val selectedPackages = linkedSetOf<String>()
     private val uninstallQueue = ArrayDeque<String>()
     private var waitingForUninstallResult = false
+    @Volatile private var scanInProgress = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -164,52 +165,76 @@ class MainActivity : Activity() {
     }
 
     private fun scanApps() {
-        apps.clear()
-        selectedPackages.clear()
+        if (scanInProgress) return
+        scanInProgress = true
+        summary.text = "กำลังสแกนรายการแอปในเบื้องหลัง..."
+        appList.removeAllViews()
 
-        val pm = packageManager
-        val installed = try {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        } catch (e: Exception) {
-            summary.text = "อ่านรายการแอปไม่สำเร็จ: ${e.localizedMessage ?: "unknown error"}"
-            return
-        }
-
-        installed.forEach { info ->
-            val packageName = info.packageName ?: return@forEach
-            val isSystem = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
-                (info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-            val label = try {
-                pm.getApplicationLabel(info).toString()
-            } catch (_: Exception) {
-                packageName
-            }
-            val launchIntent = try {
-                pm.getLaunchIntentForPackage(packageName)
-            } catch (_: Exception) {
-                null
-            }
-
-            val packageInfo = try { pm.getPackageInfo(packageName, 0) } catch (_: Exception) { null }
-            val apkBytes = try {
-                val base = java.io.File(info.sourceDir).length()
-                val splits = info.splitSourceDirs?.sumOf { java.io.File(it).length() } ?: 0L
-                base + splits
-            } catch (_: Exception) { 0L }
-            apps.add(InstalledApp(label, packageName, isSystem, launchIntent != null,
-                packageInfo?.firstInstallTime ?: 0L, packageInfo?.lastUpdateTime ?: 0L, apkBytes))
-        }
-
-        val snapshot = apps.toList()
         Thread {
-            val cacheResult = loadCacheSizes(snapshot)
+            val loadedApps = mutableListOf<InstalledApp>()
+            var scanError: String? = null
+            try {
+                val pm = packageManager
+                val installed = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                installed.forEach { info ->
+                    val packageName = info.packageName ?: return@forEach
+                    val isSystem = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0 ||
+                        (info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                    val label = try {
+                        pm.getApplicationLabel(info).toString()
+                    } catch (_: Exception) {
+                        packageName
+                    }
+                    val launchIntent = try {
+                        pm.getLaunchIntentForPackage(packageName)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val packageInfo = try { pm.getPackageInfo(packageName, 0) } catch (_: Exception) { null }
+                    val apkBytes = try {
+                        val base = java.io.File(info.sourceDir).length()
+                        val splits = info.splitSourceDirs?.sumOf { java.io.File(it).length() } ?: 0L
+                        base + splits
+                    } catch (_: Exception) { 0L }
+                    loadedApps.add(
+                        InstalledApp(
+                            label, packageName, isSystem, launchIntent != null,
+                            packageInfo?.firstInstallTime ?: 0L,
+                            packageInfo?.lastUpdateTime ?: 0L,
+                            apkBytes
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                scanError = e.localizedMessage ?: e.javaClass.simpleName
+            }
+
             runOnUiThread {
-                hasUsageAccess = cacheResult.first
-                apps.forEach { it.cacheBytes = cacheResult.second[it.packageName] }
+                scanInProgress = false
+                if (scanError != null) {
+                    summary.text = "อ่านรายการแอปไม่สำเร็จ: $scanError"
+                    Toast.makeText(this, "สแกนแอปไม่สำเร็จ", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+
+                apps.clear()
+                apps.addAll(loadedApps)
+                selectedPackages.clear()
                 renderApps()
+                summary.text = "พบ ${apps.size} แอป • กำลังอ่านขนาดแคช..."
+
+                Thread {
+                    val cacheResult = loadCacheSizes(loadedApps)
+                    runOnUiThread {
+                        hasUsageAccess = cacheResult.first
+                        apps.forEach { app ->
+                            app.cacheBytes = cacheResult.second[app.packageName]
+                        }
+                        renderApps()
+                    }
+                }.start()
             }
         }.start()
-        renderApps()
     }
 
     private fun visibleByFilter(app: InstalledApp): Boolean {
@@ -302,10 +327,10 @@ class MainActivity : Activity() {
 
     private fun loadCacheSizes(targetApps: List<InstalledApp>): Pair<Boolean, Map<String, Long>> {
         val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
-        hasUsageAccess = try {
+        val usageAccessGranted = try {
             appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
         } catch (_: Exception) { false }
-        if (!hasUsageAccess) return false to emptyMap()
+        if (!usageAccessGranted) return false to emptyMap()
         val storageStats = getSystemService(STORAGE_STATS_SERVICE) as StorageStatsManager
         val result = mutableMapOf<String, Long>()
         targetApps.forEach { app ->
