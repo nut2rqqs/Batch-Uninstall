@@ -15,6 +15,8 @@ import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -46,9 +48,16 @@ class MainActivity : Activity() {
     private lateinit var searchInput: EditText
     private lateinit var includeSystemCheck: CheckBox
     private lateinit var appList: LinearLayout
+    private lateinit var appScrollView: ScrollView
     private lateinit var sortSpinner: Spinner
     private var sortMode = 0
     private var hasUsageAccess = false
+    private var refreshCacheOnResume = false
+    private var scanGeneration = 0
+    private var displayedApps: List<InstalledApp> = emptyList()
+    private var renderedCount = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val renderBatchSize = 30
 
     private val apps = mutableListOf<InstalledApp>()
     private val selectedPackages = linkedSetOf<String>()
@@ -101,7 +110,10 @@ class MainActivity : Activity() {
         }
         root.addView(sortSpinner, fullWidthParams())
         root.addView(actionButton("ตั้งค่าสิทธิ์เพื่ออ่านขนาดแคช") {
-            try { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+            try {
+                refreshCacheOnResume = true
+                startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            }
             catch (_: Exception) { Toast.makeText(this, "เปิดหน้าสิทธิ์ไม่ได้", Toast.LENGTH_SHORT).show() }
         }, fullWidthParams())
 
@@ -151,10 +163,14 @@ class MainActivity : Activity() {
         }
         root.addView(note)
 
-        val scrollView = ScrollView(this)
+        appScrollView = ScrollView(this)
         appList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        scrollView.addView(appList)
-        root.addView(scrollView, LinearLayout.LayoutParams(
+        appScrollView.addView(appList)
+        appScrollView.setOnScrollChangeListener { view: ScrollView, _, scrollY, _, _ ->
+            val child = view.getChildAt(0) ?: return@setOnScrollChangeListener
+            if (scrollY + view.height >= child.height - dp(180)) appendNextBatch()
+        }
+        root.addView(appScrollView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
@@ -163,17 +179,55 @@ class MainActivity : Activity() {
         scanApps()
     }
 
+    /**
+     * Keep package-manager queries and APK file-stat calls off the UI thread.
+     * The screen is already visible before this work begins.
+     */
     private fun scanApps() {
-        apps.clear()
+        val generation = ++scanGeneration
         selectedPackages.clear()
+        displayedApps = emptyList()
+        renderedCount = 0
+        appList.removeAllViews()
+        summary.text = "กำลังสแกนรายการแอปในเบื้องหลัง..."
+        
+        Thread {
+            val discovered = try {
+                scanInstalledApps()
+            } catch (e: Exception) {
+                runOnUiThread {
+                    if (generation == scanGeneration) {
+                        summary.text = "อ่านรายการแอปไม่สำเร็จ: ${e.localizedMessage ?: "unknown error"}"
+                    }
+                }
+                return@Thread
+            }
 
+            runOnUiThread {
+                if (generation != scanGeneration || isFinishing) return@runOnUiThread
+                apps.clear()
+                apps.addAll(discovered)
+                summary.text = "สแกนพบ ${apps.size} แอป • กำลังอ่านข้อมูลแคช..."
+                renderApps()
+            }
+
+            // Cache statistics can be slow on devices with many installed packages.
+            // Load them after the main list is visible, without blocking interaction.
+            val cacheResult = loadCacheSizes(discovered)
+            runOnUiThread {
+                if (generation != scanGeneration || isFinishing) return@runOnUiThread
+                hasUsageAccess = cacheResult.first
+                val cacheByPackage = cacheResult.second
+                apps.forEach { it.cacheBytes = cacheByPackage[it.packageName] }
+                renderApps()
+            }
+        }.start()
+    }
+
+    private fun scanInstalledApps(): List<InstalledApp> {
         val pm = packageManager
-        val installed = try {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        } catch (e: Exception) {
-            summary.text = "อ่านรายการแอปไม่สำเร็จ: ${e.localizedMessage ?: "unknown error"}"
-            return
-        }
+        val installed = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        val result = ArrayList<InstalledApp>(installed.size)
 
         installed.forEach { info ->
             val packageName = info.packageName ?: return@forEach
@@ -189,27 +243,28 @@ class MainActivity : Activity() {
             } catch (_: Exception) {
                 null
             }
-
-            val packageInfo = try { pm.getPackageInfo(packageName, 0) } catch (_: Exception) { null }
+            val packageInfo = try {
+                pm.getPackageInfo(packageName, 0)
+            } catch (_: Exception) {
+                null
+            }
             val apkBytes = try {
                 val base = java.io.File(info.sourceDir).length()
                 val splits = info.splitSourceDirs?.sumOf { java.io.File(it).length() } ?: 0L
                 base + splits
-            } catch (_: Exception) { 0L }
-            apps.add(InstalledApp(label, packageName, isSystem, launchIntent != null,
-                packageInfo?.firstInstallTime ?: 0L, packageInfo?.lastUpdateTime ?: 0L, apkBytes))
-        }
-
-        val snapshot = apps.toList()
-        Thread {
-            val cacheResult = loadCacheSizes(snapshot)
-            runOnUiThread {
-                hasUsageAccess = cacheResult.first
-                apps.forEach { it.cacheBytes = cacheResult.second[it.packageName] }
-                renderApps()
+            } catch (_: Exception) {
+                0L
             }
-        }.start()
-        renderApps()
+            result.add(
+                InstalledApp(
+                    label, packageName, isSystem, launchIntent != null,
+                    packageInfo?.firstInstallTime ?: 0L,
+                    packageInfo?.lastUpdateTime ?: 0L,
+                    apkBytes
+                )
+            )
+        }
+        return result
     }
 
     private fun visibleByFilter(app: InstalledApp): Boolean {
@@ -223,8 +278,9 @@ class MainActivity : Activity() {
     private fun renderApps() {
         if (!::appList.isInitialized) return
         appList.removeAllViews()
+        renderedCount = 0
 
-        val visible = apps.filter(::visibleByFilter).sortedWith(when (sortMode) {
+        displayedApps = apps.filter(::visibleByFilter).sortedWith(when (sortMode) {
             1 -> compareByDescending<InstalledApp> { it.apkBytes }.thenBy { it.label.lowercase(Locale.getDefault()) }
             2 -> compareBy<InstalledApp> { it.apkBytes }.thenBy { it.label.lowercase(Locale.getDefault()) }
             3 -> compareByDescending<InstalledApp> { it.cacheBytes ?: -1L }.thenBy { it.label.lowercase(Locale.getDefault()) }
@@ -235,70 +291,86 @@ class MainActivity : Activity() {
             8 -> compareBy<InstalledApp> { it.lastUpdateTime }
             else -> compareBy<InstalledApp> { it.label.lowercase(Locale.getDefault()) }.thenBy { it.packageName }
         })
-        val launchableCount = visible.count { it.hasLaunchActivity }
-        summary.text = "พบ ${apps.size} แอป • แสดง ${visible.size} • เปิดได้ ${launchableCount} • เลือก ${selectedPackages.size}"
+        val launchableCount = displayedApps.count { it.hasLaunchActivity }
+        summary.text = "พบ ${apps.size} แอป • แสดง ${displayedApps.size} • เปิดได้ ${launchableCount} • เลือก ${selectedPackages.size}"
 
-        if (visible.isEmpty()) {
-            appList.addView(TextView(this).apply {
-                text = "ไม่พบแอปที่ตรงกับการค้นหา"
-                setPadding(0, dp(16), 0, dp(16))
-            })
+        if (displayedApps.isEmpty()) {
+            if (apps.isNotEmpty()) {
+                appList.addView(TextView(this).apply {
+                    text = "ไม่พบแอปที่ตรงกับการค้นหา"
+                    setPadding(0, dp(16), 0, dp(16))
+                })
+            }
             return
         }
+        appendNextBatch()
+    }
 
-        visible.forEach { app ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, dp(8), 0, dp(8))
-            }
-            val checkBox = CheckBox(this).apply {
-                text = app.label
-                textSize = 16f
-                isChecked = selectedPackages.contains(app.packageName)
-                setOnCheckedChangeListener { _, checked ->
-                    if (checked) selectedPackages.add(app.packageName)
-                    else selectedPackages.remove(app.packageName)
-                    summary.text = "พบ ${apps.size} แอป • แสดง ${visible.size} • เปิดได้ ${launchableCount} • เลือก ${selectedPackages.size}"
-                }
-            }
-            row.addView(checkBox)
-            row.addView(TextView(this).apply {
-                text = app.packageName
-                textSize = 12f
-            })
-            row.addView(TextView(this).apply {
-                text = if (app.isSystem) "ประเภท: แอประบบ" else "ประเภท: แอปผู้ใช้"
-                textSize = 12f
-            })
-            row.addView(TextView(this).apply {
-                text = "ขนาดไฟล์ APK: ${formatBytes(app.apkBytes)}"
-                textSize = 12f
-            })
-            row.addView(TextView(this).apply {
-                text = "ขนาดแคช: ${app.cacheBytes?.let { formatBytes(it) } ?: if (hasUsageAccess) "อ่านไม่ได้" else "ต้องอนุญาต Usage access"}"
-                textSize = 12f
-            })
-            row.addView(TextView(this).apply {
-                text = "วันที่ติดตั้ง: ${if (app.firstInstallTime > 0) DateFormat.getDateTimeInstance().format(Date(app.firstInstallTime)) else "ไม่ทราบ"}"
-                textSize = 12f
-            })
-            row.addView(TextView(this).apply {
-                text = "วันที่อัปเดต: ${if (app.lastUpdateTime > 0) DateFormat.getDateTimeInstance().format(Date(app.lastUpdateTime)) else "ไม่ทราบ"}"
-                textSize = 12f
-            })
-            row.addView(TextView(this).apply {
-                text = if (app.hasLaunchActivity) "สถานะ: พบหน้าสำหรับเปิดแอป" else "สถานะ: ไม่พบหน้าสำหรับเปิดแอป"
-                textSize = 12f
-            })
-            appList.addView(row)
-            appList.addView(View(this).apply {
-                setBackgroundColor(0xFFE0E0E0.toInt())
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
-            ))
+    /**
+     * Add only a small page of rows at a time. This prevents hundreds of
+     * TextViews from being created in one UI frame on phones with many apps.
+     */
+    private fun appendNextBatch() {
+        if (!::appList.isInitialized || renderedCount >= displayedApps.size) return
+        val end = minOf(renderedCount + renderBatchSize, displayedApps.size)
+        while (renderedCount < end) {
+            val app = displayedApps[renderedCount]
+            addAppRow(app)
+            renderedCount++
         }
     }
 
+    private fun addAppRow(app: InstalledApp) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        val checkBox = CheckBox(this).apply {
+            text = app.label
+            textSize = 16f
+            isChecked = selectedPackages.contains(app.packageName)
+            setOnCheckedChangeListener { _, checked ->
+                if (checked) selectedPackages.add(app.packageName)
+                else selectedPackages.remove(app.packageName)
+                summary.text = "พบ ${apps.size} แอป • แสดง ${displayedApps.size} • เปิดได้ ${displayedApps.count { it.hasLaunchActivity }} • เลือก ${selectedPackages.size}"
+            }
+        }
+        row.addView(checkBox)
+        row.addView(TextView(this).apply {
+            text = app.packageName
+            textSize = 12f
+        })
+        row.addView(TextView(this).apply {
+            text = if (app.isSystem) "ประเภท: แอประบบ" else "ประเภท: แอปผู้ใช้"
+            textSize = 12f
+        })
+        row.addView(TextView(this).apply {
+            text = "ขนาดไฟล์ APK: ${formatBytes(app.apkBytes)}"
+            textSize = 12f
+        })
+        row.addView(TextView(this).apply {
+            text = "ขนาดแคช: ${app.cacheBytes?.let { formatBytes(it) } ?: if (hasUsageAccess) "อ่านไม่ได้" else "ต้องอนุญาต Usage access"}"
+            textSize = 12f
+        })
+        row.addView(TextView(this).apply {
+            text = "วันที่ติดตั้ง: ${if (app.firstInstallTime > 0) DateFormat.getDateTimeInstance().format(Date(app.firstInstallTime)) else "ไม่ทราบ"}"
+            textSize = 12f
+        })
+        row.addView(TextView(this).apply {
+            text = "วันที่อัปเดต: ${if (app.lastUpdateTime > 0) DateFormat.getDateTimeInstance().format(Date(app.lastUpdateTime)) else "ไม่ทราบ"}"
+            textSize = 12f
+        })
+        row.addView(TextView(this).apply {
+            text = if (app.hasLaunchActivity) "สถานะ: พบหน้าสำหรับเปิดแอป" else "สถานะ: ไม่พบหน้าสำหรับเปิดแอป"
+            textSize = 12f
+        })
+        appList.addView(row)
+        appList.addView(View(this).apply {
+            setBackgroundColor(0xFFE0E0E0.toInt())
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
+        ))
+    }
 
     private fun loadCacheSizes(targetApps: List<InstalledApp>): Pair<Boolean, Map<String, Long>> {
         val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
@@ -329,9 +401,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::appList.isInitialized && apps.isNotEmpty()) {
+        // Refresh cache values only after the user returns from Usage Access settings.
+        // Do not repeat a full 1,000+ package query on every Activity resume.
+        if (refreshCacheOnResume && apps.isNotEmpty()) {
+            refreshCacheOnResume = false
+            val snapshot = apps.toList()
             Thread {
-                val cacheResult = loadCacheSizes(apps.toList())
+                val cacheResult = loadCacheSizes(snapshot)
                 runOnUiThread {
                     hasUsageAccess = cacheResult.first
                     apps.forEach { it.cacheBytes = cacheResult.second[it.packageName] }
