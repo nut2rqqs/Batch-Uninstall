@@ -201,9 +201,10 @@ class MainActivity : Activity() {
 
         val snapshot = apps.toList()
         Thread {
-            val cacheMap = loadCacheSizes(snapshot)
+            val cacheResult = loadCacheSizes(snapshot)
             runOnUiThread {
-                apps.forEach { it.cacheBytes = cacheMap[it.packageName] }
+                hasUsageAccess = cacheResult.first
+                apps.forEach { it.cacheBytes = cacheResult.second[it.packageName] }
                 renderApps()
             }
         }.start()
@@ -298,12 +299,12 @@ class MainActivity : Activity() {
     }
 
 
-    private fun loadCacheSizes(targetApps: List<InstalledApp>): Map<String, Long> {
+    private fun loadCacheSizes(targetApps: List<InstalledApp>): Pair<Boolean, Map<String, Long>> {
         val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
         hasUsageAccess = try {
             appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
         } catch (_: Exception) { false }
-        if (!hasUsageAccess) return emptyMap()
+        if (!hasUsageAccess) return false to emptyMap()
         val storageStats = getSystemService(STORAGE_STATS_SERVICE) as StorageStatsManager
         val result = mutableMapOf<String, Long>()
         targetApps.forEach { app ->
@@ -313,7 +314,7 @@ class MainActivity : Activity() {
                 ).cacheBytes
             } catch (_: Exception) { }
         }
-        return result
+        return true to result
     }
 
     private fun formatBytes(bytes: Long): String {
@@ -329,9 +330,10 @@ class MainActivity : Activity() {
         super.onResume()
         if (::appList.isInitialized && apps.isNotEmpty()) {
             Thread {
-                val cacheMap = loadCacheSizes(apps.toList())
+                val cacheResult = loadCacheSizes(apps.toList())
                 runOnUiThread {
-                    apps.forEach { it.cacheBytes = cacheMap[it.packageName] }
+                    hasUsageAccess = cacheResult.first
+                    apps.forEach { it.cacheBytes = cacheResult.second[it.packageName] }
                     renderApps()
                 }
             }.start()
