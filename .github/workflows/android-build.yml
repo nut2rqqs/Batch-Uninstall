@@ -2,7 +2,7 @@ name: Android build
 
 on:
   push:
-    branches: [ "main", "feat/kernelsu-batch-uninstall" ]
+    branches: [ "main", "feat/kernelsu-batch-uninstall", "fix/fast-app-loading" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
